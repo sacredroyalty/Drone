@@ -1,103 +1,99 @@
 #!/usr/bin/env python3
 """
-test_pixhawk_connection.py
-Simple script to verify MAVLink connection between Raspberry Pi and Pixhawk
-using GPIO UART (GPIO 14/15) at 921600 baud.
+test_pixhawk_connection.py  (Improved version)
+Automatically tries the most common serial ports on Raspberry Pi.
 """
 
 import asyncio
+import os
 from mavsdk import System
 import time
 
-# ================== CONFIG ==================
-# For Raspberry Pi GPIO UART (pins 14 & 15)
-CONNECTION_STRING = "serial:///dev/serial0:921600"
+# List of ports we will try (in order of preference)
+PORTS_TO_TRY = [
+    "/dev/serial0",      # Preferred symlink
+    "/dev/ttyAMA0",      # Most common on newer Pi OS
+    "/dev/ttyS0",        # Sometimes used
+    "/dev/ttyAMA1",      # Rare
+]
 
-# Alternative if serial0 doesn't work:
-# CONNECTION_STRING = "serial:///dev/ttyAMA0:921600"
-# ============================================
+BAUDRATE = 921600
 
-async def test_connection():
-    print("=" * 60)
-    print("Pixhawk ↔ Raspberry Pi Connection Test")
-    print("=" * 60)
-    print(f"Trying to connect using: {CONNECTION_STRING}")
-    print("Make sure:")
-    print("  - TELEM1 is connected to GPIO 14 (TX) & 15 (RX) + GND")
-    print("  - Baudrate is 921600 on both sides")
-    print("  - MAV_1_MODE = Onboard")
-    print("-" * 60)
+
+async def try_connect(port: str) -> bool:
+    connection_string = f"serial://{port}:{BAUDRATE}"
+    print(f"\nTrying: {connection_string}")
 
     drone = System()
-    
     try:
-        await drone.connect(system_address=CONNECTION_STRING)
+        await drone.connect(system_address=connection_string)
     except Exception as e:
-        print(f"\n[ERROR] Failed to create connection: {e}")
-        return
+        print(f"  → Failed to open port: {e}")
+        return False
 
-    print("\nWaiting for heartbeat from Pixhawk...")
-    print("(This can take up to 10–15 seconds)")
-
-    start_time = time.time()
-    connected = False
+    print("  Waiting for heartbeat (max 8 seconds)...")
+    start = time.time()
 
     try:
         async for state in drone.core.connection_state():
             if state.is_connected:
-                print("\n✅ SUCCESS! Connected to Pixhawk!")
-                connected = True
+                print(f"\n✅ SUCCESS! Connected using {port}")
+                return True
+
+            if time.time() - start > 8:
+                print("  → Timeout - no heartbeat")
                 break
 
-            if time.time() - start_time > 15:
-                print("\n❌ Timeout – No heartbeat received after 15 seconds.")
-                break
-
-            await asyncio.sleep(0.5)
-
+            await asyncio.sleep(0.3)
     except Exception as e:
-        print(f"\n[ERROR] While waiting for connection: {e}")
-        return
+        print(f"  → Error while waiting: {e}")
 
-    if not connected:
-        print("\nPossible problems:")
-        print("  1. Wrong UART device (try /dev/ttyAMA0 instead of /dev/serial0)")
-        print("  2. Baudrate mismatch (must be 921600 on both sides)")
-        print("  3. TX/RX are swapped")
-        print("  4. Serial console is still enabled (disable it in raspi-config)")
-        print("  5. Pixhawk is not powered or MAV_1_CONFIG is wrong")
-        return
+    return False
 
-    # -------- Extra useful information --------
-    print("\nGathering some basic info from the flight controller...\n")
 
-    # Autopilot version
-    try:
-        async for info in drone.info.get_version():
-            print(f"Flight Controller : {info.flight_sw_major}.{info.flight_sw_minor}.{info.flight_sw_patch}")
-            print(f"Vendor            : {info.vendor_id}")
+async def main():
+    print("=" * 65)
+    print("Pixhawk ↔ Raspberry Pi Connection Tester")
+    print("=" * 65)
+    print(f"Baudrate: {BAUDRATE}")
+    print("Make sure TX/RX are correct and MAV_1 settings are set.")
+    print("-" * 65)
+
+    # First show what serial devices exist
+    print("\nAvailable serial devices on your system:")
+    os.system("ls -l /dev/serial* /dev/ttyAMA* /dev/ttyS* 2>/dev/null || true")
+    print("-" * 65)
+
+    success = False
+    working_port = None
+
+    for port in PORTS_TO_TRY:
+        if not os.path.exists(port):
+            print(f"\nSkipping {port} (does not exist)")
+            continue
+
+        if await try_connect(port):
+            success = True
+            working_port = port
             break
-    except:
-        print("Could not get version info")
 
-    # Check if we have global position
-    print("\nChecking sensors...")
-    async for health in drone.telemetry.health():
-        print(f"  GPS                : {'OK' if health.is_global_position_ok else 'Not ready'}")
-        print(f"  Home position      : {'OK' if health.is_home_position_ok else 'Not set'}")
-        print(f"  Armable            : {'Yes' if health.is_armable else 'No'}")
-        break
-
-    # Current flight mode
-    async for mode in drone.telemetry.flight_mode():
-        print(f"  Current mode       : {mode}")
-        break
-
-    print("\n" + "=" * 60)
-    print("Connection test finished successfully!")
-    print("You can now run your MAVSDK mission scripts.")
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    if success:
+        print(f"GOOD NEWS: Connection works with → {working_port}")
+        print(f"\nUse this in your future scripts:")
+        print(f'CONNECTION = "serial://{working_port}:{BAUDRATE}"')
+    else:
+        print("❌ Could not connect with any port.")
+        print("\nNext things to check:")
+        print("1. Run:  ls -l /dev/serial* /dev/ttyAMA* /dev/ttyS*")
+        print("2. Swap TX and RX wires")
+        print("3. Make sure serial console is disabled:")
+        print("     sudo raspi-config → Interface Options → Serial Port")
+        print("     → Login shell: No  |  Serial hardware: Yes")
+        print("4. Confirm baudrate is really 921600 in QGroundControl")
+        print("5. Try a lower baudrate temporarily (57600) for testing")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
-    asyncio.run(test_connection())
+    asyncio.run(main())
